@@ -34,10 +34,18 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.animation.core.LinearEasing
 import coil.ImageLoader
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
@@ -160,29 +168,26 @@ fun GalleryNavHost(navController: NavHostController, viewModel: GalleryViewModel
 // =========================================================================
 @Composable
 fun SplashScreen(navController: NavHostController) {
-    val scale = remember { Animatable(0.5f) }
-    val alpha = remember { Animatable(0f) }
+    // 文字的光泽动画进度
+    val shimmerProgress = remember { Animatable(0f) }
+    // 整体页面的淡入淡出
+    val alphaProgress = remember { Animatable(0f) }
 
-    // 启动动画序列
     LaunchedEffect(Unit) {
-        // 并行执行放大和渐显动画
-        launch {
-            scale.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 800)
-            )
-        }
-        launch {
-            alpha.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 800)
-            )
-        }
+        // 第一步：极速淡入静态图标
+        alphaProgress.animateTo(1f, androidx.compose.animation.core.tween(400))
         
-        // 动画完成后再停留 600ms 让用户欣赏
-        delay(600)
+        // 第二步：文字“光泽般一闪” (扫光特效)
+        shimmerProgress.animateTo(
+            targetValue = 1f,
+            animationSpec = androidx.compose.animation.core.tween(
+                durationMillis = 1000, 
+                easing = LinearEasing
+            )
+        )
         
-        // 平滑跳转到首页，并且从回退栈中清空闪屏页（按返回键不会再回到闪屏页）
+        // 稍作停留，然后跳到首页
+        delay(400)
         navController.navigate("home") {
             popUpTo("splash") { inclusive = true }
         }
@@ -196,26 +201,70 @@ fun SplashScreen(navController: NavHostController) {
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.graphicsLayer(
-                scaleX = scale.value,
-                scaleY = scale.value,
-                alpha = alpha.value
-            )
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.graphicsLayer { alpha = alphaProgress.value }
         ) {
-            // 中心 Logo (修复了因使用 Android 系统自适应图标导致的闪退问题)
+            val primaryColor = MaterialTheme.colorScheme.primary
+
+            // --- 恢复最原始的图标，但是加上发光逻辑 ---
             Icon(
                 imageVector = Icons.Default.PhotoLibrary,
                 contentDescription = "App Logo",
-                modifier = Modifier.size(100.dp),
-                tint = MaterialTheme.colorScheme.primary // 改为跟随主题色的精美图标
+                modifier = Modifier
+                    .size(100.dp)
+                    .graphicsLayer(alpha = 0.99f) // 必须加这个触发图层离屏渲染，才能支持 SrcIn 混合模式
+                    .drawWithCache {
+                        val startX = (shimmerProgress.value * (size.width + 400f)) - 200f
+                        
+                        val shimmerBrush = Brush.linearGradient(
+                            colors = listOf(
+                                primaryColor,
+                                Color.White.copy(alpha=0.9f),
+                                primaryColor
+                            ),
+                            start = Offset(startX, 0f),
+                            end = Offset(startX + 150f, size.height)
+                        )
+                        
+                        onDrawWithContent {
+                            drawContent()
+                            drawRect(shimmerBrush, blendMode = BlendMode.SrcIn)
+                        }
+                    },
+                tint = primaryColor
             )
+
             Spacer(modifier = Modifier.height(16.dp))
-            // 欢迎标语
+
+            // --- 带有扫光特效（光泽般一闪）的文字 ---
             Text(
                 text = "PicHub",
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                color = primaryColor,
+                modifier = Modifier
+                    .graphicsLayer(alpha = 0.99f) // 必须加这个触发图层离屏渲染，才能支持 SrcIn 混合模式
+                    .drawWithCache {
+                        // 计算光泽当前的 X 坐标位置：从文字的极左边(-200)滑动到极右边(宽度+200)
+                        val startX = (shimmerProgress.value * (size.width + 400f)) - 200f
+                        
+                        // 创建一个横向掠过的光泽画刷
+                        val shimmerBrush = Brush.linearGradient(
+                            colors = listOf(
+                                primaryColor,               // 原始颜色
+                                Color.White.copy(alpha=0.9f), // 高亮光泽点 (白光)
+                                primaryColor                // 原始颜色
+                            ),
+                            start = Offset(startX, 0f),
+                            end = Offset(startX + 150f, size.height) // 让光带有一点倾斜角度
+                        )
+                        
+                        onDrawWithContent {
+                            drawContent()
+                            // 用 SrcIn 模式将光泽盖在文字上面 (只保留文字轮廓内的光泽)
+                            drawRect(shimmerBrush, blendMode = BlendMode.SrcIn)
+                        }
+                    }
             )
         }
     }

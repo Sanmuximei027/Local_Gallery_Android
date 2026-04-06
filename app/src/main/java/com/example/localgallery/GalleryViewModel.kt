@@ -6,9 +6,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 🌟 状态大管家 (ViewModel)
@@ -43,28 +46,61 @@ class GalleryViewModel : ViewModel() {
     private var hasLoaded = false
 
     fun loadImagesIfNeeded(context: Context) {
-        if (hasLoaded) return // 已经扫描过了，直接返回，实现“秒开”
+        if (hasLoaded) return // 内存中已有数据，直接返回
         
         viewModelScope.launch {
-            isLoading = true
-            
-            // 🌟 性能优化：将耗时的读取和正则分类操作全部移入后台线程！避免阻塞主线程（UI卡顿）
-            val categorized = withContext(Dispatchers.Default) {
-                // 1. 去底层数据库极速拉取原始数据
-                val raw = MediaStoreHelper.fetchAllImages(context)
-                
-                // 2. 读取 Room 数据库里的用户自定义规则
-                val db = AppDatabase.getDatabase(context)
-                val customRulesList = db.ruleDao().getAllRules()
-                val customRulesMap = customRulesList.associate { it.imagePath to it.customAlbumName }
+            val cacheFile = File(context.cacheDir, "gallery_snapshot.json")
+            var hasDiskCache = false
 
-                // 3. 交给我们的智能引擎去分类 (传入自定义规则)
+            // 1. 尝试从本地磁盘极速加载缓存 (实现冷启动“秒开”机制)
+            withContext(Dispatchers.IO) {
+                if (cacheFile.exists()) {
+                    try {
+                        val json = cacheFile.readText()
+                        val type = object : TypeToken<Map<String, Map<String, List<ImageItem>>>>() {}.type
+                        val cachedData: Map<String, Map<String, List<ImageItem>>> = Gson().fromJson(json, type)
+                        
+                        withContext(Dispatchers.Main) {
+                            categorizedImages = cachedData
+                            isLoading = false
+                            hasLoaded = true
+                            hasDiskCache = true
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        // 缓存可能损坏，静默跳过
+                    }
+                }
+            }
+
+            // 如果连磁盘缓存都没有（比如第一次安装），必须显示 Loading 圈
+            if (!hasDiskCache) {
+                isLoading = true
+            }
+            
+            // 2. 无论有没有缓存，后台都静默开启真正的全量扫描（不卡主 UI）
+            val categorized = withContext(Dispatchers.Default) {
+                val raw = MediaStoreHelper.fetchAllImages(context)
+                val db = AppDatabase.getDatabase(context)
+                val customRulesMap = db.ruleDao().getAllRules().associate { it.imagePath to it.customAlbumName }
                 SmartClassifier.classify(raw, customRulesMap)
             }
             
-            categorizedImages = categorized
-            isLoading = false
-            hasLoaded = true
+            // 3. 如果后台扫描发现新增了照片（或者第一次刚扫描完），才刷新 UI 并保存新快照
+            if (categorized != categorizedImages) {
+                categorizedImages = categorized
+                isLoading = false
+                hasLoaded = true
+                
+                withContext(Dispatchers.IO) {
+                    try {
+                        val json = Gson().toJson(categorized)
+                        cacheFile.writeText(json)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
         }
     }
 
