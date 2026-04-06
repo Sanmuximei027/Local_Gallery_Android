@@ -4,157 +4,156 @@ import java.io.File
 
 /**
  * 智能分类引擎的核心！
- * 在这里，我们将所有散乱的图片名，归纳到它们各自专属的“相册/文件夹”里。
+ * 在这里，我们将所有散乱的图片名，归纳到它们各自专属的“相册/文件夹”里，
+ * 并支持“主分类 -> 子分类”的两级嵌套结构！
  */
 object SmartClassifier {
 
     private val numRegex = Regex("\\d+")
 
+    // 定义二级结构的 Key
+    data class AlbumKey(val top: String, val sub: String)
+
     fun classify(
         images: List<ImageItem>,
         customRules: Map<String, String> = emptyMap()
-    ): Map<String, List<ImageItem>> {
-        // 性能优化：提前提取所有图片的第一个数字用于极速排序，避免每次比较时都执行正则匹配 (性能提升巨大)
+    ): Map<String, Map<String, List<ImageItem>>> {
+        // 性能优化：提前提取所有图片的第一个数字用于极速排序，避免每次比较时都执行正则匹配
         val imageNumbers = images.associate { it.path to (numRegex.find(it.path)?.value?.toLongOrNull() ?: 0L) }
         
+        // 1. 初步分组：将每张图片映射到一个 AlbumKey (主分类 -> 子分类)
         val grouped = images.groupBy { image ->
             // --- 0. 优先级最高：用户自定义规则 ---
             if (customRules.containsKey(image.path)) {
-                return@groupBy customRules[image.path]!!
+                return@groupBy AlbumKey(customRules[image.path]!!, "自定义合并")
             }
 
             val name = image.name.lowercase()
-            // 去掉后缀名 (例如 .jpg, .png)，只分析文件名主体
             val nameWithoutExt = name.substringBeforeLast(".")
 
             when {
                 // 1. 微信 / QQ 截图相关
-                name.startsWith("wx_camera") || name.startsWith("mmexport") || name.startsWith("micro") -> "微信保存"
-                name.startsWith("qq_") -> "QQ 保存"
+                name.startsWith("wx_camera") || name.startsWith("mmexport") || name.startsWith("micro") -> AlbumKey("微信保存", "全部")
+                name.startsWith("qq_") -> AlbumKey("QQ 保存", "全部")
                 
                 // 2. Pixiv 插画平台
-                name.contains("pixiv") || name.contains("illust_") -> "Pixiv 插画"
+                name.contains("pixiv") || name.contains("illust_") -> AlbumKey("Pixiv 插画", "全部")
                 
-                // 3. Konachan / Booru 等动漫图站 (包含 " - " 分隔符)
+                // 3. Konachan / Booru 等动漫图站
                 name.contains(" - ") -> {
                     val siteName = image.name.substringBefore(" - ").trim()
-                    siteName.replace(".com", "", ignoreCase = true)
-                            .replace(".net", "", ignoreCase = true)
+                    val cleanName = siteName.replace(".com", "", ignoreCase = true)
+                                            .replace(".net", "", ignoreCase = true)
+                    AlbumKey(cleanName, "全部")
                 }
 
                 // 4. 截图 (Screenshot)
-                name.contains("screenshot") -> "手机截图"
+                name.contains("screenshot") -> AlbumKey("手机截图", "全部")
 
-                // 5. 【增强版：直接使用非标准父文件夹名称，支持特殊结构和系统白名单】
+                // 5. 【两级目录解析：找到主分类与子分类】
                 else -> {
-                    val parentFile = File(image.path).parentFile
-                    var parentName = parentFile?.name
+                    var currentDir = File(image.path).parentFile
+                    var topName: String? = null
+                    var subName = "全部"
                     
-                    if (parentName != null) {
-                        val lowerParent = parentName.lowercase()
+                    // 向上追溯，最多追溯 4 层
+                    for (i in 0 until 4) {
+                        val dirName = currentDir?.name ?: break
+                        val lowerDir = dirName.lowercase()
                         
-                        // 先匹配标准白名单系统路径：将这些被忽略的系统文件夹转换为中文优质相册名
+                        if (lowerDir in listOf("0", "emulated", "media")) break
+                        
+                        // 白名单匹配
                         val standardDirs = mapOf(
-                            "camera" to "相机照片",
-                            "dcim" to "相机照片",
-                            "pictures" to "普通图片",
-                            "images" to "普通图片",
-                            "download" to "下载目录",
-                            "downloads" to "下载目录",
-                            "weixin" to "微信",
-                            "wechat" to "微信"
+                            "camera" to "相机照片", "dcim" to "相机照片",
+                            "pictures" to "普通图片", "images" to "普通图片",
+                            "download" to "下载目录", "downloads" to "下载目录",
+                            "weixin" to "微信", "wechat" to "微信"
                         )
+                        if (standardDirs.containsKey(lowerDir)) {
+                            topName = standardDirs[lowerDir]!!
+                            break
+                        }
                         
-                        if (standardDirs.containsKey(lowerParent)) {
-                            return@groupBy standardDirs[lowerParent]!!
+                        // 检查当前目录是否是无意义层级 (子分类)
+                        val isHash = dirName.contains(Regex("\\[.*?\\]")) || 
+                                     dirName.contains(Regex("\\(.*?\\)")) ||
+                                     dirName.matches(Regex("^[a-fA-F0-9_-]{6,}$"))
+                                     
+                        val isChapter = dirName.all { it.isDigit() } ||
+                                        Regex("第?\\d+(话|章|卷|回)").matches(dirName) ||
+                                        lowerDir.startsWith("chapter") ||
+                                        lowerDir.startsWith("ch") ||
+                                        lowerDir.startsWith("vol")
+                                        
+                        if (isHash || isChapter) {
+                            // 如果是哈希/章节，我们将最底层遇到的那个当作“子分类”
+                            if (subName == "全部") subName = dirName
+                        } else {
+                            // 找到了第一个“有意义”的名字！把它当作主分类
+                            topName = dirName
+                            break
                         }
-
-                        // 检测是否是系统级无用名，跳过
-                        if (lowerParent !in listOf("0", "emulated", "media")) {
-                            
-                            // 🌟 往上追溯一层的触发条件：
-                            // 1. 文件夹名是纯粹的哈希标识，例如 [f5960170] 或纯字母数字乱码
-                            val isHash = (parentName.startsWith("[") && parentName.endsWith("]")) ||
-                                         parentName.matches(Regex("^[a-fA-F0-9_-]{8,}$"))
-                            
-                            // 2. 文件夹名是章节标识，例如纯数字，或带有"章","话"等
-                            val isChapter = parentName.all { it.isDigit() } ||
-                                    Regex("第?\\d+(话|章|卷|回)").matches(parentName) ||
-                                    lowerParent.startsWith("chapter") ||
-                                    lowerParent.startsWith("ch") ||
-                                    lowerParent.startsWith("vol")
-                            
-                            val grandParentFile = parentFile?.parentFile
-                            val grandParentName = grandParentFile?.name
-                            val lowerGrand = grandParentName?.lowercase() ?: ""
-                            
-                            // 如果符合条件，且爷爷目录不是被忽略的系统无用名，就提取爷爷的名字作为真正相册！
-                            if ((isChapter || isHash) && grandParentName != null && 
-                                lowerGrand !in listOf("0", "emulated", "dcim", "pictures", "download", "camera", "images", "media")) {
-                                return@groupBy grandParentName
-                            } else {
-                                return@groupBy parentName // 否则正常使用它本身的名字
-                            }
-                        }
+                        
+                        currentDir = currentDir.parentFile
                     }
                     
-                    // --- 如果连上级文件夹名称都没有获取到，则继续进行以下模式匹配 ---
-                    // 6. 纯数字、乱码、或者像 n06_2_08 这样的序列号
+                    if (topName != null) {
+                        return@groupBy AlbumKey(topName, subName)
+                    }
+                    
+                    // --- 兜底匹配 ---
                     if (nameWithoutExt.all { it.isDigit() } ||
                         (nameWithoutExt.length > 12 && !nameWithoutExt.contains("_") && !nameWithoutExt.contains("-")) ||
                         nameWithoutExt.matches(Regex("^[a-zA-Z]{0,5}[_-]?\\d+([_-]\\d+)*$"))
                     ) {
-                        "未分类序列图"
-                    } 
-                    // 7. 通用前缀匹配 (下划线或连字符)
-                    else if (name.contains("_")) {
+                        AlbumKey("未分类序列图", "全部")
+                    } else if (name.contains("_")) {
                         val prefix = name.substringBefore("_")
                         if (prefix.length in 2..15) {
-                            prefix.replaceFirstChar { it.uppercase() }
+                            AlbumKey("未分类图库", prefix.replaceFirstChar { it.uppercase() })
                         } else {
-                            "未分类图库"
+                            AlbumKey("未分类图库", "全部")
                         }
-                    } 
-                    // 8. 其他所有无法识别的
-                    else {
-                        "未分类图库"
+                    } else {
+                        AlbumKey("未分类图库", "全部")
                     }
                 }
             }
         }
 
-        // 🌟 【解决痛点补充问题】：孤儿相册清理！
-        val finalGroups = mutableMapOf<String, MutableList<ImageItem>>()
+        // 🌟 孤儿相册清理与数字自然排序
+        val finalMap = mutableMapOf<String, MutableMap<String, List<ImageItem>>>()
         val others = mutableListOf<ImageItem>()
 
-        // 🌟 自然排序器（已优化性能，读取预处理好的数字）
         val naturalOrderComparator = Comparator<ImageItem> { a, b ->
             val aNum = imageNumbers[a.path] ?: 0L
             val bNum = imageNumbers[b.path] ?: 0L
             if (aNum == bNum) a.path.compareTo(b.path) else aNum.compareTo(bNum)
         }
 
-        for ((albumName, imgs) in grouped) {
-            // 对每个相册内部的图片进行【乱序修复：数字自然排序】
+        for ((key, imgs) in grouped) {
             val sortedImgs = imgs.sortedWith(naturalOrderComparator)
-
-            // 保护白名单：即使只有 1 张，这些系统级相册也保留
             val whiteList = listOf("微信保存", "QQ 保存", "Pixiv 插画", "手机截图")
             
-            if (sortedImgs.size == 1 && albumName !in whiteList) {
-                // 只有 1 张图的孤儿，踢出独立相册，加入杂项
+            // 如果这个主相册总共就 1 张图，且不在白名单，踢入杂项
+            if (sortedImgs.size == 1 && key.top !in whiteList && key.sub == "全部") {
                 others.addAll(sortedImgs)
             } else {
-                // 正常的相册，保留
-                finalGroups[albumName] = sortedImgs.toMutableList()
+                if (!finalMap.containsKey(key.top)) {
+                    finalMap[key.top] = mutableMapOf()
+                }
+                finalMap[key.top]!![key.sub] = sortedImgs
             }
         }
 
-        // 把收集到的所有孤儿图片，统一放进一个特定的相册
         if (others.isNotEmpty()) {
-            finalGroups["散落的图片 (未成组)"] = others
+            if (!finalMap.containsKey("散落的图片 (未成组)")) {
+                finalMap["散落的图片 (未成组)"] = mutableMapOf()
+            }
+            finalMap["散落的图片 (未成组)"]!!["全部"] = others.sortedWith(naturalOrderComparator)
         }
 
-        return finalGroups
+        return finalMap
     }
 }

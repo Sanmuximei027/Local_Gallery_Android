@@ -15,16 +15,19 @@ import kotlinx.coroutines.withContext
  */
 class GalleryViewModel : ViewModel() {
     
-    // 所有的相册数据字典
-    var categorizedImages by mutableStateOf<Map<String, List<ImageItem>>>(emptyMap())
+    // 所有的相册数据字典 (TopLevel -> SubLevel -> Images)
+    var categorizedImages by mutableStateOf<Map<String, Map<String, List<ImageItem>>>>(emptyMap())
         private set
 
     // 是否正在加载中
     var isLoading by mutableStateOf(true)
         private set
 
-    // 记录当前点击进入的是哪个相册
-    var currentAlbumName by mutableStateOf("")
+    // 记录当前点击进入的是哪个大相册
+    var currentTopAlbumName by mutableStateOf("")
+    
+    // 记录当前点击进入的是哪个子相册
+    var currentSubAlbumName by mutableStateOf("")
 
     // 记录当前点击的是相册里的第几张图片 (用于全屏左右滑动定位)
     var currentInitialIndex by mutableStateOf(0)
@@ -67,7 +70,7 @@ class GalleryViewModel : ViewModel() {
 
     // 获取当前正在查看的相册里的所有图片
     fun getCurrentImageList(): List<ImageItem> {
-        return categorizedImages[currentAlbumName] ?: emptyList()
+        return categorizedImages[currentTopAlbumName]?.get(currentSubAlbumName) ?: emptyList()
     }
 
     // 重新加载并分类数据，用于用户新增或删除了相册规则后刷新

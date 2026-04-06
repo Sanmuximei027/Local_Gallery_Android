@@ -51,6 +51,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation("androidx.compose.material:material-icons-extended")
     implementation("io.coil-kt:coil-compose:2.6.0") // 强大的 Compose 图片加载库
+    implementation("io.coil-kt:coil-gif:2.6.0") // 🌟 Coil 的 GIF 解码支持库
     // 增加导航库，为全屏看图做准备
     implementation("androidx.navigation:navigation-compose:2.7.7")
     
