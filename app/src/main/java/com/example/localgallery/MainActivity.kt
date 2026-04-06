@@ -1,0 +1,581 @@
+package com.example.localgallery
+
+import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import coil.compose.AsyncImage
+import com.example.localgallery.ui.theme.LocalGalleryTheme
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            LocalGalleryTheme {
+                val navController = rememberNavController()
+                // 全局共享的 ViewModel，实现状态持久化和“零延迟”跳转
+                val galleryViewModel: GalleryViewModel = viewModel()
+                
+                val context = LocalContext.current
+                LaunchedEffect(Unit) {
+                    galleryViewModel.loadWallpaper(context)
+                }
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // 全局自定义壁纸
+                    if (galleryViewModel.customWallpaperUri != null) {
+                        AsyncImage(
+                            model = galleryViewModel.customWallpaperUri,
+                            contentDescription = "Background Wallpaper",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        // 暗色遮罩，保证上层文字可见 (支持动态护眼)
+                        Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)))
+                    }
+
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize(),
+                        containerColor = Color.Transparent // 让 Scaffold 变透明，透出背景
+                    ) { innerPadding ->
+                        GalleryNavHost(
+                            navController = navController,
+                            viewModel = galleryViewModel,
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 🌟 导航中心
+@Composable
+fun GalleryNavHost(navController: NavHostController, viewModel: GalleryViewModel, modifier: Modifier = Modifier) {
+    NavHost(navController = navController, startDestination = "home", modifier = modifier) {
+        
+        // 【1. 首页：网格展示大封面】
+        composable("home") {
+            HomeScreen(viewModel = viewModel, navController = navController)
+        }
+        
+        // 【2. 相册详情页：网格展示相册内的所有照片】
+        composable("album_detail") {
+            AlbumDetailScreen(viewModel = viewModel, navController = navController)
+        }
+
+        // 【3. 沉浸式全屏图册：支持左右滑动翻页】
+        composable("fullscreen_pager") {
+            FullScreenPagerScreen(viewModel = viewModel, navController = navController)
+        }
+    }
+}
+
+// =========================================================================
+// 页面 1：首页 (大封面网格)
+// =========================================================================
+@Composable
+fun HomeScreen(viewModel: GalleryViewModel, navController: NavHostController) {
+    val context = LocalContext.current
+    var permissionGranted by remember { mutableStateOf(false) }
+
+    // 动态判断权限
+    val permissionToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= 34) { Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED }
+        Manifest.permission.READ_MEDIA_IMAGES
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            permissionGranted = isGranted
+            if (isGranted) {
+                // 有权限了，通知 ViewModel 去扫描（它内部会防重）
+                viewModel.loadImagesIfNeeded(context)
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(permissionToRequest)
+    }
+
+    val documentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                // 请求永久读取权限，避免重启后失效
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                    viewModel.setCustomWallpaper(context, uri.toString())
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    )
+
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "PicHub",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            // 修改壁纸按钮为更高级的图标
+            IconButton(onClick = { documentLauncher.launch(arrayOf("image/*")) }) {
+                Icon(
+                    imageVector = Icons.Default.Wallpaper,
+                    contentDescription = "更换壁纸",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+
+        // 添加搜索框 (模糊搜索)
+        OutlinedTextField(
+            value = viewModel.searchQuery,
+            onValueChange = { viewModel.searchQuery = it },
+            placeholder = { Text("搜索相册...") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "搜索") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+            shape = RoundedCornerShape(12.dp)
+        )
+
+        if (!permissionGranted) {
+            Text("请授予读取存储权限，否则无法加载图片。")
+        } else if (viewModel.isLoading) {
+            Text("正在飞速扫描全盘图库中...")
+        } else if (viewModel.categorizedImages.isEmpty()) {
+            Text("未扫描到任何图片...")
+        } else {
+            // 🌟 模糊搜索过滤
+            val albumNames = viewModel.categorizedImages.keys.filter {
+                it.contains(viewModel.searchQuery, ignoreCase = true)
+            }.toList()
+            
+            if (albumNames.isEmpty() && viewModel.searchQuery.isNotEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("未找到相册 🥺", style = MaterialTheme.typography.bodyLarge)
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2), // 2列网格
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(albumNames) { albumName ->
+                        val imagesInAlbum = viewModel.categorizedImages[albumName]!!
+                        val coverImage = imagesInAlbum.first() // 提取第一张作为封面
+
+                        AlbumCoverCard(
+                            coverImage = coverImage,
+                            albumName = albumName,
+                            imageCount = imagesInAlbum.size,
+                            onClick = {
+                                // 记录当前点击的相册，然后跳转
+                                viewModel.currentAlbumName = albumName
+                                navController.navigate("album_detail")
+                            }
+                        )
+                    }
+                    item { Spacer(modifier = Modifier.height(40.dp)) }
+                }
+            }
+        }
+    }
+}
+
+// 首页的精美相册卡片组件
+@Composable
+fun AlbumCoverCard(coverImage: ImageItem, albumName: String, imageCount: Int, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f) // 正方形封面
+            .clickable { onClick() },
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // 背景封面图
+            AsyncImage(
+                model = coverImage.path,
+                contentDescription = albumName,
+                contentScale = ContentScale.Crop, // 裁剪填充
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // 底部黑色毛玻璃渐变遮罩 (保护文字可读性)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))
+                        )
+                    )
+                    .padding(12.dp)
+            ) {
+                Column {
+                    Text(
+                        text = albumName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1 // 超长防换行
+                    )
+                    Text(
+                        text = "$imageCount 张",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.8f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// =========================================================================
+// 页面 2：相册详情页 (所有照片的网格墙)
+// =========================================================================
+@Composable
+fun AlbumDetailScreen(viewModel: GalleryViewModel, navController: NavHostController) {
+    val albumName = viewModel.currentAlbumName
+    val images = viewModel.getCurrentImageList()
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 顶部导航栏 (改为返回箭头)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = { navController.popBackStack() }
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = albumName,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+        }
+
+        // 🌟 网格展示相册内所有小图 (一行三列)
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)
+        ) {
+            itemsIndexed(images) { index, image ->
+                AsyncImage(
+                    model = image.path,
+                    contentDescription = image.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f) // 保证缩略图是正方形
+                        .clickable {
+                            // 记录点击了第几张，然后去全屏页面！
+                            viewModel.currentInitialIndex = index
+                            navController.navigate("fullscreen_pager")
+                        }
+                )
+            }
+        }
+    }
+}
+
+// =========================================================================
+// 页面 3：沉浸式全屏图册 (支持左右滑动翻页)
+// =========================================================================
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FullScreenPagerScreen(viewModel: GalleryViewModel, navController: NavHostController) {
+    val images = viewModel.getCurrentImageList()
+    val pagerState = rememberPagerState(
+        initialPage = viewModel.currentInitialIndex,
+        pageCount = { images.size }
+    )
+    
+    // 控制底部详情面板的显示状态
+    val sheetState = rememberModalBottomSheetState()
+    var showBottomSheet by remember { mutableStateOf(false) }
+    
+    // 控制屏幕上的小部件 (返回箭头、信息按钮等) 是否显示 (沉浸式体验)
+    var showUI by remember { mutableStateOf(true) }
+    
+    // 当前正在全屏查看的图片
+    val currentImage = images[pagerState.currentPage]
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize()
+        ) { page ->
+            val image = images[page]
+            
+            // 加入双击缩放和手势缩放功能
+            var scale by remember { mutableFloatStateOf(1f) }
+            var offset by remember { mutableStateOf(Offset.Zero) }
+            
+            // 切换图片时恢复原比例
+            LaunchedEffect(page) {
+                scale = 1f
+                offset = Offset.Zero
+            }
+            
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { showUI = !showUI }, // 单击隐藏或显示 UI
+                            onDoubleTap = {
+                                // 双击放大 2 倍，或还原
+                                scale = if (scale > 1f) 1f else 2f
+                                offset = Offset.Zero
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            val maxX = (size.width * (scale - 1)) / 2
+                            val maxY = (size.height * (scale - 1)) / 2
+                            offset = Offset(
+                                x = (offset.x + pan.x * scale).coerceIn(-maxX, maxX),
+                                y = (offset.y + pan.y * scale).coerceIn(-maxY, maxY)
+                            )
+                        }
+                    }
+            ) {
+                AsyncImage(
+                    model = image.path,
+                    contentDescription = image.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y
+                        )
+                )
+            }
+        }
+
+        if (showUI) {
+            // 顶部悬浮栏：返回按钮箭头 + 当前页码指示器
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .align(Alignment.TopStart),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = { navController.popBackStack() },
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(50))
+                ) {
+                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                }
+                
+                Text(
+                    text = "${pagerState.currentPage + 1} / ${images.size}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
+
+            // 底部悬浮栏：极其简化的小巧的 [i] 属性按钮
+            IconButton(
+                onClick = { showBottomSheet = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 32.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(50))
+            ) {
+                Icon(imageVector = Icons.Default.Info, contentDescription = "查看属性", tint = Color.White)
+            }
+        }
+    }
+
+    // 🌟 从底部弹出的属性详情面板 (BottomSheet)
+    if (showBottomSheet) {
+        val context = LocalContext.current
+        val coroutineScope = rememberCoroutineScope()
+        var showMoveDialog by remember { mutableStateOf(false) }
+
+        ModalBottomSheet(
+            onDismissRequest = { showBottomSheet = false },
+            sheetState = sheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text("图片详细信息", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                
+                DetailItem(title = "当前相册", value = viewModel.currentAlbumName)
+                DetailItem(title = "推测来源", value = currentImage.inferredSource)
+                DetailItem(title = "文件名称", value = currentImage.name)
+                DetailItem(title = "文件大小", value = currentImage.formattedSize)
+                DetailItem(title = "存储路径", value = currentImage.path)
+                
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Button(
+                    onClick = { showMoveDialog = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("移动到自定义相册 (覆盖规则)")
+                }
+                
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+
+        // --- 移动相册的 Dialog ---
+        if (showMoveDialog) {
+            var newAlbumName by remember { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { showMoveDialog = false },
+                title = { Text("移动到新相册") },
+                text = {
+                    Column {
+                        Text("输入你想把这张图片放入的相册名：")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = newAlbumName,
+                            onValueChange = { newAlbumName = it },
+                            label = { Text("相册名") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (newAlbumName.isNotBlank()) {
+                                // 启动协程保存规则到 Room 数据库
+                                coroutineScope.launch {
+                                    val db = AppDatabase.getDatabase(context)
+                                    db.ruleDao().insertRule(RuleEntity(currentImage.path, newAlbumName))
+                                    
+                                    // 刷新全库
+                                    showMoveDialog = false
+                                    showBottomSheet = false
+                                    viewModel.reloadRulesAndReclassify(context)
+                                    navController.popBackStack("home", inclusive = false)
+                                }
+                            }
+                        }
+                    ) {
+                        Text("确定移动")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showMoveDialog = false }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
+    }
+}
+
+// 详情面板里的单行数据组件
+@Composable
+fun DetailItem(title: String, value: String) {
+    Column {
+        Text(text = title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        Text(text = value, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
