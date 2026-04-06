@@ -52,6 +52,7 @@ import coil.decode.ImageDecoderDecoder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -69,6 +70,8 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import coil.compose.AsyncImage
 import com.example.localgallery.ui.theme.LocalGalleryTheme
 import kotlinx.coroutines.launch
@@ -76,6 +79,23 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // 🌟 设置全局支持 GIF 的 ImageLoader
+        val imageLoader = ImageLoader.Builder(this)
+            .components {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    add(ImageDecoderDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
+            }
+            // 🌟 解决内存溢出闪退：由于开启了 GIF 自动播放，这里必须设置图片缓存和硬件加速控制，防止同时播放太多 GIF 导致 OOM
+            .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+            .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+            .allowHardware(false) // 禁用硬件解码，对于部分大体积 GIF 极容易引发底层硬件崩溃，软解更稳定
+            .build()
+        coil.Coil.setImageLoader(imageLoader)
+
         enableEdgeToEdge()
         setContent {
             LocalGalleryTheme {
@@ -88,25 +108,11 @@ class MainActivity : ComponentActivity() {
                     galleryViewModel.loadWallpaper(context)
                 }
 
-                // 🌟 配置带有 GIF 解码能力的 ImageLoader
-                val imageLoader = remember {
-                    ImageLoader.Builder(context)
-                        .components {
-                            if (Build.VERSION.SDK_INT >= 28) {
-                                add(ImageDecoderDecoder.Factory())
-                            } else {
-                                add(GifDecoder.Factory())
-                            }
-                        }
-                        .build()
-                }
-
                 Box(modifier = Modifier.fillMaxSize()) {
                     // 全局自定义壁纸 (现在完美支持静态图和 GIF 动图了)
                     if (galleryViewModel.customWallpaperUri != null) {
                         AsyncImage(
                             model = galleryViewModel.customWallpaperUri,
-                            imageLoader = imageLoader,
                             contentDescription = "Background Wallpaper",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
@@ -273,14 +279,17 @@ fun SplashScreen(navController: NavHostController) {
 // =========================================================================
 // 页面 1：首页 (大封面网格)
 // =========================================================================
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(viewModel: GalleryViewModel, navController: NavHostController, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var permissionGranted by remember { mutableStateOf(false) }
+    var isRefreshing by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     // 如果正在搜索，点击返回键会清除搜索框，而不是退出应用
     BackHandler(enabled = viewModel.searchQuery.isNotEmpty()) {
-        viewModel.searchQuery = ""
+        viewModel.updateSearchQuery("")
     }
 
     // 动态判断权限
@@ -350,12 +359,12 @@ fun HomeScreen(viewModel: GalleryViewModel, navController: NavHostController, mo
         // 添加搜索框 (模糊搜索)
         OutlinedTextField(
             value = viewModel.searchQuery,
-            onValueChange = { viewModel.searchQuery = it },
-            placeholder = { Text("搜索相册...") },
+            onValueChange = { viewModel.updateSearchQuery(it) }, // 🌟 使用防抖且不卡 UI 的新方法更新搜索
+            placeholder = { Text("搜索相册或路径...") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = "搜索") },
             trailingIcon = {
                 if (viewModel.searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { viewModel.searchQuery = "" }) {
+                    IconButton(onClick = { viewModel.updateSearchQuery("") }) {
                         Icon(Icons.Default.Clear, contentDescription = "清空搜索")
                     }
                 }
@@ -375,24 +384,80 @@ fun HomeScreen(viewModel: GalleryViewModel, navController: NavHostController, mo
         } else if (viewModel.categorizedImages.isEmpty()) {
             Text("未扫描到任何图片...")
         } else {
-            // 🌟 模糊搜索过滤
-            val albumNames = viewModel.categorizedImages.keys.filter {
-                it.contains(viewModel.searchQuery, ignoreCase = true)
-            }.toList()
+            // 🌟 深度路径搜索过滤 (已转交后台防抖处理，UI 渲染零负担！)
+            val filteredMap = viewModel.displayedImages
+            val albumNames = filteredMap.keys.toList()
+
+            // 🌟 自定义根目录功能 (不仅将关键词设为顶级相册，而且底层会自动提取它的子文件夹作为章节)
+            if (viewModel.searchQuery.isNotEmpty()) {
+                ElevatedButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            val query = viewModel.searchQuery.trim()
+                            if (query.isNotEmpty()) {
+                                val db = AppDatabase.getDatabase(context)
+                                // 🌟 核心突破：直接存入 "关键词" 作为一条广义规则！
+                                // 分类引擎看到这条规则，会自动拦截包含此路径的图片，将其归为该关键词的专属主相册，同时利用其原有路径名拆分出子章节！
+                                db.ruleDao().insertRule(RuleEntity(query, query))
+                                
+                                viewModel.updateSearchQuery("") // 清空搜索
+                                isRefreshing = true
+                                viewModel.forceRefreshImages(context) {
+                                    isRefreshing = false
+                                    android.widget.Toast.makeText(context, "已将包含【$query】的路径设为独立专属相册！原有章节已完美保留！", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.elevatedButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    ),
+                    elevation = ButtonDefaults.elevatedButtonElevation(
+                        defaultElevation = 6.dp,
+                        pressedElevation = 2.dp
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "纳入该搜索相册",
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text(
+                        text = "纳入该搜索相册",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+            }
             
             if (albumNames.isEmpty() && viewModel.searchQuery.isNotEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("未找到相册 🥺", style = MaterialTheme.typography.bodyLarge)
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2), // 2列网格
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing,
+                    onRefresh = {
+                        isRefreshing = true
+                        viewModel.forceRefreshImages(context) {
+                            isRefreshing = false
+                        }
+                    },
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(albumNames) { topAlbumName ->
-                        val subAlbums = viewModel.categorizedImages[topAlbumName]!!
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2), // 2列网格
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(albumNames) { topAlbumName ->
+                        val subAlbums = filteredMap[topAlbumName]!!
                         
                         // 提取第一张作为封面，并且计算总图片数
                         var totalImages = 0
@@ -428,6 +493,7 @@ fun HomeScreen(viewModel: GalleryViewModel, navController: NavHostController, mo
             }
         }
     }
+}
 }
 
 // 首页的精美相册卡片组件
@@ -591,6 +657,7 @@ fun AlbumDetailScreen(viewModel: GalleryViewModel, navController: NavHostControl
                         .clickable {
                             // 记录点击了第几张，然后去全屏页面！
                             viewModel.currentInitialIndex = index
+                            viewModel.currentImageId = image.id
                             navController.navigate("fullscreen_pager")
                         }
                 )
@@ -605,9 +672,14 @@ fun AlbumDetailScreen(viewModel: GalleryViewModel, navController: NavHostControl
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FullScreenPagerScreen(viewModel: GalleryViewModel, navController: NavHostController) {
-    val images = viewModel.getCurrentImageList()
+    // 🌟 核心突破：获取整个大相册下的所有图片 (打平)，彻底解决“频繁跳出文件夹”的痛点！
+    val images = viewModel.getFlattenedImageList()
+    
+    // 定位到刚刚点击的那张图在全局列表中的位置
+    val initialIndex = images.indexOfFirst { it.id == viewModel.currentImageId }.takeIf { it >= 0 } ?: 0
+
     val pagerState = rememberPagerState(
-        initialPage = viewModel.currentInitialIndex,
+        initialPage = initialIndex,
         pageCount = { images.size }
     )
     
