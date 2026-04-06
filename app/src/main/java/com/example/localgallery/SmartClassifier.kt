@@ -2,107 +2,203 @@ package com.example.localgallery
 
 import java.io.File
 
-/**
- * 智能分类引擎的核心！
- * 在这里，我们将所有散乱的图片名，归纳到它们各自专属的“相册/文件夹”里，
- * 并支持“主分类 -> 子分类”的两级嵌套结构！
- */
 object SmartClassifier {
 
     private val numRegex = Regex("\\d+")
 
-    // 定义二级结构的 Key
     data class AlbumKey(val top: String, val sub: String)
 
     fun classify(
         images: List<ImageItem>,
         customRules: Map<String, String> = emptyMap()
     ): Map<String, Map<String, List<ImageItem>>> {
-        // 性能优化：提前提取所有图片的第一个数字用于极速排序，避免每次比较时都执行正则匹配
         val imageNumbers = images.associate { it.path to (numRegex.find(it.path)?.value?.toLongOrNull() ?: 0L) }
         
-        // 1. 初步分组：将每张图片映射到一个 AlbumKey (主分类 -> 子分类)
         val grouped = images.groupBy { image ->
-            // --- 0. 优先级最高：用户自定义规则 ---
             if (customRules.containsKey(image.path)) {
-                return@groupBy AlbumKey(customRules[image.path]!!, "自定义合并")
+                var customSubName = File(image.path).parentFile?.name ?: "全部"
+                if (customSubName.matches(Regex("^[a-fA-F0-9_-]{6,}$")) || customSubName.matches(Regex("^\\d{10,}$"))) customSubName = "全部"
+                return@groupBy AlbumKey(customRules[image.path]!!, customSubName)
             }
 
             val name = image.name.lowercase()
             val nameWithoutExt = name.substringBeforeLast(".")
 
             when {
-                // 1. 微信 / QQ 截图相关
                 name.startsWith("wx_camera") || name.startsWith("mmexport") || name.startsWith("micro") -> AlbumKey("微信保存", "全部")
                 name.startsWith("qq_") -> AlbumKey("QQ 保存", "全部")
-                
-                // 2. Pixiv 插画平台
                 name.contains("pixiv") || name.contains("illust_") -> AlbumKey("Pixiv 插画", "全部")
-                
-                // 3. Konachan / Booru 等动漫图站
                 name.contains(" - ") -> {
                     val siteName = image.name.substringBefore(" - ").trim()
                     val cleanName = siteName.replace(".com", "", ignoreCase = true)
                                             .replace(".net", "", ignoreCase = true)
                     AlbumKey(cleanName, "全部")
                 }
-
-                // 4. 截图 (Screenshot)
                 name.contains("screenshot") -> AlbumKey("手机截图", "全部")
-
-                // 5. 【两级目录解析：找到主分类与子分类】
                 else -> {
                     var currentDir = File(image.path).parentFile
                     var topName: String? = null
                     var subName = "全部"
                     
-                    // 向上追溯，最多追溯 4 层
-                    for (i in 0 until 4) {
+                    val standardDirs = mapOf(
+                        "camera" to "相机照片", "dcim" to "相机照片",
+                        "pictures" to "普通图片", "images" to "普通图片",
+                        "download" to "下载目录", "downloads" to "下载目录",
+                        "weixin" to "微信", "wechat" to "微信",
+                        "tachiyomi" to "Tachiyomi (漫画)"
+                    )
+                    
+                    // 🌟 1. 自下而上 (Bottom-Up)：第一阶段，过滤并收集底部的“章节/乱码”层级
+                    for (i in 0 until 6) {
                         val dirName = currentDir?.name ?: break
                         val lowerDir = dirName.lowercase()
                         
-                        if (lowerDir in listOf("0", "emulated", "media")) break
+                        if (lowerDir in listOf("0", "emulated", "media", "storage", "sdcard", "android", "data")) break
                         
-                        // 白名单匹配
-                        val standardDirs = mapOf(
-                            "camera" to "相机照片", "dcim" to "相机照片",
-                            "pictures" to "普通图片", "images" to "普通图片",
-                            "download" to "下载目录", "downloads" to "下载目录",
-                            "weixin" to "微信", "wechat" to "微信"
-                        )
                         if (standardDirs.containsKey(lowerDir)) {
-                            topName = standardDirs[lowerDir]!!
+                            if (topName == null) topName = standardDirs[lowerDir]!!
                             break
                         }
                         
-                        // 检查当前目录是否是无意义层级 (子分类)
-                        val isHash = dirName.contains(Regex("\\[.*?\\]")) || 
-                                     dirName.contains(Regex("\\(.*?\\)")) ||
-                                     dirName.matches(Regex("^[a-fA-F0-9_-]{6,}$"))
-                                     
-                        val isChapter = dirName.all { it.isDigit() } ||
-                                        Regex("第?\\d+(话|章|卷|回)").matches(dirName) ||
-                                        lowerDir.startsWith("chapter") ||
-                                        lowerDir.startsWith("ch") ||
-                                        lowerDir.startsWith("vol")
+                        val isPureHash = dirName.matches(Regex("^\\[[a-fA-F0-9]{8,}\\]$")) || 
+                                         dirName.matches(Regex("^[a-fA-F0-9_-]{8,}$"))
+                                         
+                        val cleanDirForChapter = dirName.replace(Regex("^\\[.*?\\]|^【.*?】|^\\(.*?\\)"), "").trim()
+                        val lowerCleanDir = cleanDirForChapter.lowercase()
+                        
+                        // 强化章节判定，加入 page、part 等泛用词汇
+                        val isChapter = cleanDirForChapter.all { it.isDigit() } ||
+                                        Regex("^第?\\d+(话|章|卷|回|部|季|期|节).*").matches(cleanDirForChapter) ||
+                                        lowerCleanDir.startsWith("chapter") ||
+                                        lowerCleanDir.matches(Regex("^ch[\\s\\._-]?\\d+.*")) ||
+                                        lowerCleanDir.startsWith("vol") ||
+                                        lowerCleanDir.startsWith("disc") ||
+                                        lowerCleanDir.contains(Regex("_?page\\s*\\d+")) || 
+                                        lowerCleanDir.contains(Regex("_?part\\s*\\d+")) ||
+                                        Regex("^\\d+(\\.\\d+)?[\\s\\-_]+.*").matches(cleanDirForChapter)
                                         
-                        if (isHash || isChapter) {
-                            // 如果是哈希/章节，我们将最底层遇到的那个当作“子分类”
-                            if (subName == "全部") subName = dirName
+                        if (isPureHash || isChapter) {
+                            // 是章节层，将其压入子相册路径，继续向上！
+                            if (subName == "全部") {
+                                subName = dirName
+                            } else {
+                                subName = "$dirName / $subName"
+                            }
                         } else {
-                            // 找到了第一个“有意义”的名字！把它当作主分类
+                            // 找到了第一个非章节的实体名字！(例如：崛与宫村)
                             topName = dirName
                             break
                         }
-                        
                         currentDir = currentDir.parentFile
                     }
                     
-                    if (topName != null) {
-                        return@groupBy AlbumKey(topName, subName)
+                    if (topName == null && subName != "全部") {
+                        topName = subName.substringBefore(" / ")
+                        val remainingSub = subName.substringAfter(" / ", "")
+                        subName = if (remainingSub.isEmpty()) "全部" else remainingSub
                     }
                     
-                    // --- 兜底匹配 ---
+                    if (topName != null) {
+                        // 🌟 2. 自下而上 (Bottom-Up)：第二阶段，“同源/标签父级”向上吸收机制
+                        // 目标：解决 `宫村2012/崛与宫村` 或 `[汉化组] 崛与宫村/崛与宫村` 这种多级冗余/相关分类
+                        var peekDir = currentDir?.parentFile
+                        var initialCleanTop = topName!!.replace(Regex("\\[.*?\\]|\\(.*?\\)|【.*?】"), "").trim()
+                        
+                        while (peekDir != null && initialCleanTop.isNotEmpty()) {
+                            val peekName = peekDir.name
+                            val lowerPeek = peekName.lowercase()
+                            
+                            // 遇到系统级目录、标准目录或绝对的泛用垃圾词，立刻停止吸收
+                            if (lowerPeek in listOf("0", "emulated", "media", "storage", "sdcard", "android", "data")) break
+                            if (standardDirs.containsKey(lowerPeek)) break
+                            if (lowerPeek in listOf("manga", "漫画", "comics", "comic", "animate", "anime", "doujinshi", "同人", "同人志", "cg", "bilibili")) break
+                            
+                            val cleanPeek = peekName.replace(Regex("\\[.*?\\]|\\(.*?\\)|【.*?】"), "").trim()
+                            
+                            // 核心判定：父级是否和当前级有“血缘关系”？
+                            // 1. 包含标签 (通常是画师/汉化组外壳)
+                            // 2. 名字互相包含 (例如 "崛与宫村" 和 "宫村2012"，或者 "[搬运] 宫村" 和 "宫村")
+                            // 3. 拥有共同的关键字长度 >= 2
+                            val hasTags = peekName.contains(Regex("\\[|【|\\("))
+                            val isRedundant = cleanPeek.isNotEmpty() && (
+                                cleanPeek.contains(initialCleanTop) || 
+                                initialCleanTop.contains(cleanPeek) ||
+                                // 提取两个名字中长度大于等于2的共同中文字符串
+                                cleanPeek.filter { it.isLetter() }.windowed(2).any { initialCleanTop.contains(it) }
+                            )
+                                              
+                            if (hasTags || isRedundant) {
+                                // 判定为同源分类或标签分类！吸收它作为新的顶级分类，把原来的顶级分类降级塞入子分类
+                                if (subName == "全部") {
+                                    subName = topName!!
+                                } else {
+                                    subName = "$topName / $subName"
+                                }
+                                topName = peekName
+                                initialCleanTop = cleanPeek.ifEmpty { initialCleanTop } // 更新对比基准
+                                peekDir = peekDir.parentFile
+                            } else {
+                                // 遇到没有标签且名字不相关的目录（说明已经爬出了这个作品的范围），立刻停止！
+                                break
+                            }
+                        }
+
+                        // 3. 智能多重标签提取 (提取顶级相册名中的画师/汉化组)
+                        val tagRegex = Regex("^\\[(.*?)\\]|^【(.*?)】|^\\((.*?)\\)")
+                        var currentTopName = topName!!.trim()
+                        var extractedTag: String? = null
+                        
+                        while (true) {
+                            val match = tagRegex.find(currentTopName) ?: break
+                            val tagContent = match.groupValues[1].ifEmpty { match.groupValues[2] }.ifEmpty { match.groupValues[3] }.trim()
+                            
+                            val isEvent = tagContent.matches(Regex("^(C\\d+|COMIC|例大祭|红楼梦|M3).*?", RegexOption.IGNORE_CASE))
+                            val isNumber = tagContent.matches(Regex("^\\d+$"))
+                            
+                            if (!isEvent && !isNumber && extractedTag == null) {
+                                extractedTag = tagContent
+                            }
+                            currentTopName = currentTopName.removePrefix(match.value).trim().trimStart('-', '_', ' ')
+                        }
+                        
+                        if (extractedTag != null) {
+                            topName = extractedTag
+                            val bookName = currentTopName.ifEmpty { "全部" }
+                            if (subName == "全部") {
+                                subName = bookName
+                            } else if (bookName != "全部") {
+                                subName = "$bookName / $subName"
+                            }
+                        }
+
+                        // 4. 处理单层平铺文件夹既包含书名又包含章节的情况 (例如 "MangaName - 第1话")
+                        val chRegex1 = Regex("^(.*?)\\s*(?:[-_]\\s*)?(第\\d+(话|章|卷|回|部|季|期).*|(?:chapter|ch|vol)[\\.\\s_-]?\\d+.*)$", RegexOption.IGNORE_CASE)
+                        val chRegex2 = Regex("^(.*?)\\s+[-_]\\s+(\\d+(\\.\\d+)?[\\s\\-_]*.*)$")
+                        val match1 = chRegex1.find(topName!!)
+                        val match2 = chRegex2.find(topName!!)
+                        val chMatch = match1 ?: match2
+                        
+                        if (chMatch != null && chMatch.groupValues[1].isNotBlank()) {
+                            val baseName = chMatch.groupValues[1].trim()
+                            val chapterPart = chMatch.groupValues[2].trim()
+                            topName = baseName
+                            if (subName == "全部") {
+                                subName = chapterPart
+                            } else {
+                                subName = "$chapterPart / $subName"
+                            }
+                        }
+
+                        // 5. 应用自定义规则 (保留底层结构)
+                        val keywordRule = customRules.entries.firstOrNull { it.key.length > 2 && image.path.contains(it.key, ignoreCase = true) }
+                        if (keywordRule != null && topName != keywordRule.value) {
+                            subName = if (subName == "全部") topName!! else "$topName / $subName"
+                            topName = keywordRule.value
+                        }
+
+                        return@groupBy AlbumKey(topName!!, subName)
+                    }
+                    
                     if (nameWithoutExt.all { it.isDigit() } ||
                         (nameWithoutExt.length > 12 && !nameWithoutExt.contains("_") && !nameWithoutExt.contains("-")) ||
                         nameWithoutExt.matches(Regex("^[a-zA-Z]{0,5}[_-]?\\d+([_-]\\d+)*$"))
@@ -122,7 +218,6 @@ object SmartClassifier {
             }
         }
 
-        // 🌟 孤儿相册清理与数字自然排序
         val finalMap = mutableMapOf<String, MutableMap<String, List<ImageItem>>>()
         val others = mutableListOf<ImageItem>()
 
@@ -132,12 +227,18 @@ object SmartClassifier {
             if (aNum == bNum) a.path.compareTo(b.path) else aNum.compareTo(bNum)
         }
 
+        // To fix extreme fragmentation (1-image albums), we aggregate them by top level first
+        val topLevelCounts = grouped.entries.groupBy { it.key.top }.mapValues { entry ->
+            entry.value.sumOf { it.value.size }
+        }
+
         for ((key, imgs) in grouped) {
             val sortedImgs = imgs.sortedWith(naturalOrderComparator)
             val whiteList = listOf("微信保存", "QQ 保存", "Pixiv 插画", "手机截图")
             
-            // 如果这个主相册总共就 1 张图，且不在白名单，踢入杂项
-            if (sortedImgs.size == 1 && key.top !in whiteList && key.sub == "全部") {
+            val totalInTopLevel = topLevelCounts[key.top] ?: 0
+            
+            if (totalInTopLevel == 1 && key.top !in whiteList) {
                 others.addAll(sortedImgs)
             } else {
                 if (!finalMap.containsKey(key.top)) {

@@ -76,6 +76,11 @@ object MediaStoreHelper {
                 val dateAdded = cursor.getLong(dateAddedColumn)
                 val size = cursor.getLong(sizeColumn)
 
+                // 核心修复：检查文件是否真实存在！
+                // MediaStore 在外置 SD 卡或 U 盘拔出时，可能会延迟更新数据库（保留已失效的路径）
+                // 导致图库依然显示幽灵图片。通过 File.exists() 强制过滤失效文件！
+                if (!java.io.File(path).exists()) continue
+
                 imageList.add(ImageItem(id, name, path, dateAdded, size))
             }
         }
