@@ -1,0 +1,52 @@
+name: Android CI/CD
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  release:
+    types: [published] # 触发条件：当你在 GitHub 网页上发布一个新的 Release 时
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须赋予写入权限，以便能把 APK 传到 Release 里
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug
+
+    # 1. 正常的代码 Push：保留原来的逻辑，只存入后台 Artifacts 作为备份
+    - name: Upload APK Artifact
+      if: github.event_name != 'release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/app-debug.apk
+
+    # 2. 网页端发布 Release：自动重命名 APK 并挂载到 Release 页面
+    - name: Upload APK to Release
+      if: github.event_name == 'release'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # 将默认的 app-debug.apk 重命名为带版本号的名字，例如 PicHub-v1.0.0.apk
+        mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/PicHub-${{ github.event.release.tag_name }}.apk
+        # 上传重命名后的 APK 到 Release
+        gh release upload ${{ github.event.release.tag_name }} app/build/outputs/apk/debug/PicHub-${{ github.event.release.tag_name }}.apk --clobber
