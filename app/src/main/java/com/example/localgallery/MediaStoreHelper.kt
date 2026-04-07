@@ -41,7 +41,41 @@ data class ImageItem(
         }
 }
 
+
+data class ImageMetadata(val count: Int, val maxDateAdded: Long)
+
 object MediaStoreHelper {
+    suspend fun fetchImageMetadata(context: Context): ImageMetadata = withContext(Dispatchers.IO) {
+        val projection = arrayOf(
+            "COUNT(${MediaStore.Images.Media._ID})",
+            "MAX(${MediaStore.Images.Media.DATE_ADDED})"
+        )
+        val selection = "${MediaStore.Images.Media.SIZE} > 0"
+        
+        var count = 0
+        var maxDate = 0L
+        
+        try {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    count = cursor.getInt(0)
+                    maxDate = cursor.getLong(1)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        return@withContext ImageMetadata(count, maxDate)
+    }
+
+
     
     suspend fun fetchAllImages(context: Context): List<ImageItem> = withContext(Dispatchers.IO) {
         val imageList = mutableListOf<ImageItem>()
@@ -56,10 +90,11 @@ object MediaStoreHelper {
 
         val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
 
+        val selection = "${MediaStore.Images.Media.SIZE} > 0"
         context.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,
-            null,
+            selection,
             null,
             sortOrder
         )?.use { cursor ->
@@ -75,11 +110,6 @@ object MediaStoreHelper {
                 val path = cursor.getString(dataColumn) ?: continue
                 val dateAdded = cursor.getLong(dateAddedColumn)
                 val size = cursor.getLong(sizeColumn)
-
-                // 核心修复：检查文件是否真实存在！
-                // MediaStore 在外置 SD 卡或 U 盘拔出时，可能会延迟更新数据库（保留已失效的路径）
-                // 导致图库依然显示幽灵图片。通过 File.exists() 强制过滤失效文件！
-                if (!java.io.File(path).exists()) continue
 
                 imageList.add(ImageItem(id, name, path, dateAdded, size))
             }

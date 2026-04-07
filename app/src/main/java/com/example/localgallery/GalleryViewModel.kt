@@ -23,8 +23,14 @@ class GalleryViewModel : ViewModel() {
         private set
 
     // 是否正在加载中
+    
     var isLoading by mutableStateOf(true)
         private set
+
+    // 🌟 新增：追踪上次扫描的元数据，用于极速判定是否需要刷新
+    private var lastScanMetadata: ImageMetadata? = null
+    private var lastRuleCount: Int = -1
+
 
     // 记录当前点击进入的是哪个大相册
     var currentTopAlbumName by mutableStateOf("")
@@ -163,7 +169,47 @@ class GalleryViewModel : ViewModel() {
         }
     }
     
-    // 🌟 核心：仅从指定的当前大相册中提取图片
+    // 🌟 核心：直接将指定的图片列表提取并应用新规则
+    fun extractSpecificImages(
+        context: Context,
+        imagesToMove: List<ImageItem>,
+        newAlbumName: String,
+        onComplete: (Int) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (imagesToMove.isEmpty()) {
+                withContext(Dispatchers.Main) { onComplete(0) }
+                return@launch
+            }
+
+            // 获取数据库，为这些图片插入【精准的绝对路径规则】
+            val db = AppDatabase.getDatabase(context)
+            val ruleDao = db.ruleDao()
+            val rules = imagesToMove.map { image ->
+                RuleEntity(
+                    imagePath = image.path,
+                    customAlbumName = newAlbumName
+                )
+            }
+            ruleDao.insertRules(rules)
+
+            // 规则已更新，重置上次扫描规则数强制触发下次完全刷新，并删除缓存
+            lastRuleCount = -1
+            val cacheFile = File(context.cacheDir, "gallery_snapshot.json")
+            if (cacheFile.exists()) {
+                cacheFile.delete()
+            }
+
+            // 切回主线程，触发 UI 全局刷新并执行成功回调
+            withContext(Dispatchers.Main) {
+                forceRefreshImages(context) {
+                    onComplete(imagesToMove.size)
+                }
+            }
+        }
+    }
+
+    // 🌟 核心：仅从指定的当前大相册中提取图片 (保留旧方法防止其他地方用到)
     fun extractImagesFromSpecificAlbum(
         context: Context,
         sourceTopAlbum: String,
@@ -187,16 +233,16 @@ class GalleryViewModel : ViewModel() {
             // 获取数据库，为这些图片插入【精准的绝对路径规则】
             val db = AppDatabase.getDatabase(context)
             val ruleDao = db.ruleDao()
-            for (image in imagesToMove) {
-                ruleDao.insertRule(
-                    RuleEntity(
-                        imagePath = image.path, // 存绝对路径！绝不会误伤其他相册的同名图
-                        customAlbumName = newAlbumName
-                    )
+            val rules = imagesToMove.map { image ->
+                RuleEntity(
+                    imagePath = image.path,
+                    customAlbumName = newAlbumName
                 )
             }
+            ruleDao.insertRules(rules)
 
-            // 规则已更新，删除旧快照缓存
+            // 规则已更新，重置上次扫描规则数强制触发下次完全刷新，并删除缓存
+            lastRuleCount = -1
             val cacheFile = File(context.cacheDir, "gallery_snapshot.json")
             if (cacheFile.exists()) {
                 cacheFile.delete()
@@ -214,6 +260,30 @@ class GalleryViewModel : ViewModel() {
     // 手动下拉刷新，强制重新扫描
     fun forceRefreshImages(context: Context, onComplete: () -> Unit) {
         viewModelScope.launch {
+            val (needsFullScan, newMeta, newRuleCount) = withContext(Dispatchers.IO) {
+                val meta = MediaStoreHelper.fetchImageMetadata(context)
+                val db = AppDatabase.getDatabase(context)
+                val ruleCount = db.ruleDao().getAllRules().size
+                
+                val changed = lastScanMetadata == null ||
+                              lastRuleCount == -1 ||
+                              meta.count != lastScanMetadata!!.count || 
+                              meta.maxDateAdded != lastScanMetadata!!.maxDateAdded ||
+                              ruleCount != lastRuleCount
+                              
+                Triple(changed, meta, ruleCount)
+            }
+            
+            if (!needsFullScan && categorizedImages.isNotEmpty()) {
+                // 图库数量、最新日期以及自定义规则都没变，说明没有新图也没有新提取！
+                // 直接秒回，避免重新序列化卡顿。
+                onComplete()
+                return@launch
+            }
+            
+            lastScanMetadata = newMeta
+            lastRuleCount = newRuleCount
+
             val categorized = withContext(Dispatchers.Default) {
                 val raw = MediaStoreHelper.fetchAllImages(context)
                 val db = AppDatabase.getDatabase(context)

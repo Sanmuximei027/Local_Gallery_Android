@@ -16,7 +16,8 @@ object SmartClassifier {
         
         val grouped = images.groupBy { image ->
             if (customRules.containsKey(image.path)) {
-                var customSubName = File(image.path).parentFile?.name ?: "全部"
+                val parentPath = image.path.substringBeforeLast('/', "")
+                var customSubName = if (parentPath.contains('/')) parentPath.substringAfterLast('/') else "全部"
                 if (customSubName.matches(Regex("^[a-fA-F0-9_-]{6,}$")) || customSubName.matches(Regex("^\\d{10,}$"))) customSubName = "全部"
                 return@groupBy AlbumKey(customRules[image.path]!!, customSubName)
             }
@@ -36,7 +37,7 @@ object SmartClassifier {
                 }
                 name.contains("screenshot") -> AlbumKey("手机截图", "全部")
                 else -> {
-                    var currentDir = File(image.path).parentFile
+                    var currentDirPath = image.path.substringBeforeLast('/', "")
                     var topName: String? = null
                     var subName = "全部"
                     
@@ -50,7 +51,8 @@ object SmartClassifier {
                     
                     // 🌟 1. 自下而上 (Bottom-Up)：第一阶段，过滤并收集底部的“章节/乱码”层级
                     for (i in 0 until 6) {
-                        val dirName = currentDir?.name ?: break
+                        if (currentDirPath.isEmpty() || !currentDirPath.contains('/')) break
+                        val dirName = currentDirPath.substringAfterLast('/')
                         val lowerDir = dirName.lowercase()
                         
                         if (lowerDir in listOf("0", "emulated", "media", "storage", "sdcard", "android", "data")) break
@@ -89,7 +91,7 @@ object SmartClassifier {
                             topName = dirName
                             break
                         }
-                        currentDir = currentDir.parentFile
+                        currentDirPath = currentDirPath.substringBeforeLast('/', "")
                     }
                     
                     if (topName == null && subName != "全部") {
@@ -101,11 +103,11 @@ object SmartClassifier {
                     if (topName != null) {
                         // 🌟 2. 自下而上 (Bottom-Up)：第二阶段，“同源/标签父级”向上吸收机制
                         // 目标：解决 `宫村2012/崛与宫村` 或 `[汉化组] 崛与宫村/崛与宫村` 这种多级冗余/相关分类
-                        var peekDir = currentDir?.parentFile
+                        var peekDirPath = currentDirPath.substringBeforeLast('/', "")
                         var initialCleanTop = topName!!.replace(Regex("\\[.*?\\]|\\(.*?\\)|【.*?】"), "").trim()
                         
-                        while (peekDir != null && initialCleanTop.isNotEmpty()) {
-                            val peekName = peekDir.name
+                        while (peekDirPath.contains('/') && initialCleanTop.isNotEmpty()) {
+                            val peekName = peekDirPath.substringAfterLast('/')
                             val lowerPeek = peekName.lowercase()
                             
                             // 遇到系统级目录、标准目录或绝对的泛用垃圾词，立刻停止吸收
@@ -136,7 +138,7 @@ object SmartClassifier {
                                 }
                                 topName = peekName
                                 initialCleanTop = cleanPeek.ifEmpty { initialCleanTop } // 更新对比基准
-                                peekDir = peekDir.parentFile
+                                peekDirPath = peekDirPath.substringBeforeLast('/', "")
                             } else {
                                 // 遇到没有标签且名字不相关的目录（说明已经爬出了这个作品的范围），立刻停止！
                                 break
@@ -238,7 +240,8 @@ object SmartClassifier {
             
             val totalInTopLevel = topLevelCounts[key.top] ?: 0
             
-            if (totalInTopLevel == 1 && key.top !in whiteList) {
+            // 如果是用户自定义提取的相册，即使只有1张图，也绝对不允许被碎片化合并！
+            if (totalInTopLevel == 1 && key.top !in whiteList && !customRules.containsValue(key.top)) {
                 others.addAll(sortedImgs)
             } else {
                 if (!finalMap.containsKey(key.top)) {

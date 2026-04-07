@@ -11,6 +11,9 @@ interface RuleDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRule(rule: RuleEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRules(rules: List<RuleEntity>)
+
     @Query("DELETE FROM custom_rules WHERE imagePath = :imagePath")
     suspend fun deleteRule(imagePath: String)
 
