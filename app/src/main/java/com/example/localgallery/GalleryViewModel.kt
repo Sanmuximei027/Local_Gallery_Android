@@ -163,6 +163,54 @@ class GalleryViewModel : ViewModel() {
         }
     }
     
+    // 🌟 核心：仅从指定的当前大相册中提取图片
+    fun extractImagesFromSpecificAlbum(
+        context: Context,
+        sourceTopAlbum: String,
+        keyword: String,
+        newAlbumName: String,
+        onComplete: (Int) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val subs = categorizedImages[sourceTopAlbum] ?: return@launch
+            
+            // 找出这个相册下，所有路径或文件名包含该关键词的图片
+            val imagesToMove = subs.values.flatten().filter {
+                it.path.contains(keyword, ignoreCase = true) || it.name.contains(keyword, ignoreCase = true)
+            }
+
+            if (imagesToMove.isEmpty()) {
+                withContext(Dispatchers.Main) { onComplete(0) }
+                return@launch
+            }
+
+            // 获取数据库，为这些图片插入【精准的绝对路径规则】
+            val db = AppDatabase.getDatabase(context)
+            val ruleDao = db.ruleDao()
+            for (image in imagesToMove) {
+                ruleDao.insertRule(
+                    RuleEntity(
+                        imagePath = image.path, // 存绝对路径！绝不会误伤其他相册的同名图
+                        customAlbumName = newAlbumName
+                    )
+                )
+            }
+
+            // 规则已更新，删除旧快照缓存
+            val cacheFile = File(context.cacheDir, "gallery_snapshot.json")
+            if (cacheFile.exists()) {
+                cacheFile.delete()
+            }
+
+            // 切回主线程，触发 UI 全局刷新并执行成功回调
+            withContext(Dispatchers.Main) {
+                forceRefreshImages(context) {
+                    onComplete(imagesToMove.size)
+                }
+            }
+        }
+    }
+
     // 手动下拉刷新，强制重新扫描
     fun forceRefreshImages(context: Context, onComplete: () -> Unit) {
         viewModelScope.launch {

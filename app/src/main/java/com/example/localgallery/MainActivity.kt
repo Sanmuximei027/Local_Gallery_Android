@@ -547,6 +547,13 @@ fun AlbumCoverCard(coverImage: ImageItem, albumName: String, imageCount: Int, on
     }
 }
 
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+
 // =========================================================================
 // 页面 2：二级分类相册页 (展示主分类下的各个合集/章节)
 // =========================================================================
@@ -556,6 +563,10 @@ fun SubAlbumListScreen(viewModel: GalleryViewModel, navController: NavHostContro
     val subAlbums = viewModel.categorizedImages[topAlbumName] ?: emptyMap()
 
     Column(modifier = modifier.fillMaxSize()) {
+        val context = LocalContext.current
+        var extractKeyword by remember { mutableStateOf("") }
+        var isExtracting by remember { mutableStateOf(false) }
+
         // 顶部导航栏
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -569,11 +580,75 @@ fun SubAlbumListScreen(viewModel: GalleryViewModel, navController: NavHostContro
                 )
             }
             Spacer(modifier = Modifier.width(8.dp))
+            
+            // 标题占据剩余的全部左侧空间，把后面的组件挤到最右侧
             Text(
                 text = topAlbumName,
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                maxLines = 1
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+
+            // 🌟 半透明磨砂胶囊提取框
+            BasicTextField(
+                value = extractKeyword,
+                onValueChange = { extractKeyword = it },
+                singleLine = true,
+                textStyle = LocalTextStyle.current.copy(
+                    color = MaterialTheme.colorScheme.onSurface, 
+                    fontSize = 14.sp
+                ),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), // 软键盘显示“搜索”键
+                keyboardActions = KeyboardActions(
+                    onSearch = {
+                        // 用户点击键盘搜索键时触发提取
+                        if (extractKeyword.isNotBlank() && !isExtracting) {
+                            isExtracting = true
+                            viewModel.extractImagesFromSpecificAlbum(
+                                context = context,
+                                sourceTopAlbum = topAlbumName, // 仅针对当前相册搜索
+                                keyword = extractKeyword,
+                                newAlbumName = extractKeyword // 直接用关键词作新相册的名字
+                            ) { count ->
+                                isExtracting = false
+                                if (count > 0) {
+                                    Toast.makeText(context, "成功提取 $count 张到【$extractKeyword】", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "当前相册未找到包含该关键词的图片", Toast.LENGTH_SHORT).show()
+                                }
+                                extractKeyword = "" // 提取完成后清空输入框
+                            }
+                        }
+                    }
+                ),
+                decorationBox = { innerTextField ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .background(
+                                // 半透明磨砂底色，跟随你的黑暗/白天主题自动适配
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(16.dp) // 胶囊圆角
+                            )
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .widthIn(min = 110.dp, max = 150.dp) // 保持小巧
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search, 
+                            contentDescription = "提取", 
+                            modifier = Modifier.size(16.dp), 
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (extractKeyword.isEmpty()) {
+                                Text("提取提取...", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                            innerTextField()
+                        }
+                    }
+                }
             )
         }
 
